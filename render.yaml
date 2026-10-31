@@ -1,0 +1,24 @@
+# Render "Blueprint": lets Render create the web service from this file.
+services:
+  - type: web
+    name: releaseguard
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: MONGO_URI
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: WEBHOOK_SECRET
+        generateValue: true
+      - key: N8N_WEBHOOK_URL
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: DB_NAME
+        value: releaseguard
+      - key: MAX_COMMITS
+        value: "30"

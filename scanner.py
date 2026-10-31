@@ -1,19 +1,27 @@
 # scanner.py
-# The manager: fetches commits, runs the checks, saves everything to MongoDB.
+# The manager: fetches commits, runs the checks, saves everything to MongoDB,
+# then computes the verdict and (if it turned BLOCK) sends an alert.
 import hashlib
+import logging
 import os
+import threading
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from pymongo.errors import DuplicateKeyError
 
+import alerts
 import detectors as det
 import github_client as gh
 import osv_client as osv
 from db import get_db
+from history import compute_verdict
+
+log = logging.getLogger("releaseguard.scanner")
 
 MAX_COMMITS = int(os.getenv("MAX_COMMITS", "30"))
 SEVERITY_WEIGHT = {"critical": 10, "high": 7, "medium": 4, "low": 2, "info": 1}
+_scan_slots = threading.BoundedSemaphore(int(os.getenv("MAX_PARALLEL_SCANS", "3")))
 
 
 class ScanError(Exception):
@@ -25,14 +33,18 @@ def now():
 
 
 def stable_id(*parts):
-    """Same inputs -> always the same ID (this makes duplicates detectable)."""
+    """Same inputs -> always the same ID (this is what makes duplicates detectable)."""
     return hashlib.sha256("|".join(str(p) for p in parts).encode()).hexdigest()[:32]
 
 
 # ---------- Step A: prepare ----------
 
 def prepare_scan(repo_input, trigger="manual"):
-    """Validate the repo, save it, create a 'running' scan. Returns scanId."""
+    """
+    Validate the repo, save it, and create a 'running' scan.
+    Returns (scan_id, repo_id, reused). If this repo already has a scan running,
+    that scan is reused instead of starting a second one.
+    """
     db = get_db()
     owner, name = gh.parse_repo_url(repo_input)
     info = gh.get_repo(owner, name)
@@ -40,17 +52,18 @@ def prepare_scan(repo_input, trigger="manual"):
 
     db.repos.update_one(
         {"_id": repo_id},
-        {
-            "$set": {
-                "owner": info["owner"],
-                "name": info["name"],
-                "url": info["url"],
-                "defaultBranch": info["defaultBranch"],
-            },
-            "$setOnInsert": {"createdAt": now()},
-        },
+        {"$set": {"owner": info["owner"], "name": info["name"], "url": info["url"],
+                  "fullName": info["fullName"], "defaultBranch": info["defaultBranch"]},
+         "$setOnInsert": {"createdAt": now()}},
         upsert=True,
     )
+
+    running = db.scans.find_one({
+        "repoId": repo_id, "status": "running",
+        "startedAt": {"$gte": now() - timedelta(minutes=10)},
+    })
+    if running:
+        return running["scanId"], repo_id, True
 
     scan_id = "scan-" + uuid.uuid4().hex[:12]
     db.scans.insert_one({
@@ -61,12 +74,38 @@ def prepare_scan(repo_input, trigger="manual"):
         "startedAt": now(),
         "commitsFound": 0,
         "commitsScanned": 0,
+        "commitsToScan": 0,
         "commitsSkipped": 0,
         "findingsAdded": 0,
         "verdict": None,
         "error": None,
     })
-    return scan_id
+    return scan_id, repo_id, False
+
+
+def start_scan_in_background(repo_input, trigger="manual"):
+    """Used by the website and the webhook: returns immediately, scans in a thread."""
+    scan_id, repo_id, reused = prepare_scan(repo_input, trigger)
+    if not reused:
+        threading.Thread(target=_background, args=(scan_id,), daemon=True).start()
+    return scan_id, repo_id, reused
+
+
+def _background(scan_id):
+    with _scan_slots:  # at most N scans at the same time
+        try:
+            run_scan(scan_id, log=log.info)
+        except Exception as e:  # already recorded on the scan document
+            log.warning("scan %s failed: %s", scan_id, e)
+
+
+def mark_stale_scans():
+    """If the server restarted mid-scan, mark those scans as failed (they can be re-run)."""
+    get_db().scans.update_many(
+        {"status": "running", "startedAt": {"$lt": now() - timedelta(minutes=15)}},
+        {"$set": {"status": "failed", "error": "Interrupted. Run the scan again.",
+                  "finishedAt": now()}},
+    )
 
 
 # ---------- Step B: run ----------
@@ -98,6 +137,7 @@ def run_scan(scan_id, log=print):
 
         db.scans.update_one({"scanId": scan_id}, {"$set": {
             "commitsFound": len(shas),
+            "commitsToScan": len(new_shas),
             "commitsSkipped": len(shas) - len(new_shas),
         }})
         log(f"Found {len(shas)} commits: {len(new_shas)} new, "
@@ -125,20 +165,41 @@ def run_scan(scan_id, log=print):
                     "scannedAt": now(),
                 })
             except DuplicateKeyError:
-                pass  # another scan saved it at the same time -- that's fine
+                pass  # saved by another scan at the same moment: fine
 
             total_added += added
             db.scans.update_one({"scanId": scan_id}, {"$set": {
                 "commitsScanned": i,
                 "findingsAdded": total_added,
+                "currentCommit": sha,
             }})
             log(f"[{i}/{len(new_shas)}] {sha[:7]} {commit['message'][:50]} "
                 f"-> {added} new finding(s)")
 
+        previous = (db.repos.find_one({"_id": repo_id}, {"lastVerdict": 1}) or {}
+                    ).get("lastVerdict")
+        result = compute_verdict(repo_id)
+        finished = now()
+        db.repos.update_one({"_id": repo_id}, {"$set": {
+            "lastVerdict": result["verdict"],
+            "lastReasons": result["reasons"],
+            "lastScanId": scan_id,
+            "lastScanAt": finished,
+        }})
+        try:
+            alert = alerts.maybe_alert(repo_id, scan_id, previous, result)
+        except Exception as e:  # an alert problem must never break a scan
+            alert = {"status": "failed", "error": str(e)}
         db.scans.update_one({"scanId": scan_id}, {"$set": {
             "status": "completed",
-            "finishedAt": now(),
+            "finishedAt": finished,
+            "verdict": result["verdict"],
+            "previousVerdict": previous,
+            "verdictReasons": result["reasons"],
+            "alertStatus": (alert or {}).get("status"),
         }})
+        log(f"Verdict: {result['verdict']}")
+        return result
 
     except (gh.GitHubError, osv.OSVError) as e:
         _fail(db, scan_id, str(e))
@@ -214,7 +275,7 @@ def _scan_commit(db, repo_id, scan_id, commit):
                 dep = c.pop("dep")
                 info = vuln_info.get((dep["ecosystem"], dep["name"], dep["version"]))
                 if not info:
-                    continue  # this version is safe -> not a finding
+                    continue  # this version is safe: not a finding
                 n = info["vulnCount"]
                 c["severity"] = info["severity"]
                 c["title"] = (f"{dep['name']} {dep['version']} has {n} known "
@@ -225,7 +286,7 @@ def _scan_commit(db, repo_id, scan_id, commit):
                     "vulnCount": n, "vulnIds": info["vulnIds"], "summary": info["summary"],
                 }
         else:
-            # "removed" only matters if this exact risk was added before
+            # a "removed" event only matters if this exact risk was added before
             c.pop("dep", None)
             previous = db.findings.find_one(
                 {"repoId": repo_id, "fingerprint": c["fingerprint"], "action": "added"},
@@ -260,6 +321,6 @@ def _scan_commit(db, repo_id, scan_id, commit):
                 added_count += 1
                 risk_score += SEVERITY_WEIGHT[c["severity"]]
         except DuplicateKeyError:
-            pass  # already saved by an earlier (crashed) scan -- safe to ignore
+            pass  # saved by an earlier (interrupted) scan: safe to ignore
 
     return added_count, risk_score

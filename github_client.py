@@ -29,8 +29,7 @@ def parse_repo_url(text):
     match = _URL_RE.match(text) or _SHORT_RE.match(text)
     if not match:
         raise GitHubError(
-            "Please enter a valid GitHub repo link, like https://github.com/owner/repo"
-        )
+            "Enter a GitHub repo link like https://github.com/owner/repo")
     owner, name = match.group(1), match.group(2)
     if name.endswith(".git"):
         name = name[:-4]
@@ -54,25 +53,25 @@ def _get(path, params=None):
     try:
         r = requests.get(API + path, headers=_headers(), params=params, timeout=TIMEOUT)
     except requests.RequestException:
-        raise GitHubError("Could not reach GitHub. Check your internet connection.")
+        raise GitHubError("Could not reach GitHub. Check the internet connection.")
 
     if r.status_code == 404:
-        raise GitHubError("Repo not found or private.")
+        raise GitHubError("Repo not found or private. ReleaseGuard scans public repos.")
     if r.status_code == 401:
-        raise GitHubError("GitHub token is invalid. Check GITHUB_TOKEN in your .env file.")
+        raise GitHubError("The GitHub token is invalid. Check GITHUB_TOKEN.")
     if r.status_code in (403, 429):
         if r.headers.get("X-RateLimit-Remaining") == "0":
-            raise GitHubError("GitHub rate limit reached. Please try again later.")
+            raise GitHubError("GitHub rate limit reached. Try again in a few minutes.")
         raise GitHubError("GitHub refused the request.")
     if r.status_code == 409:
-        raise GitHubError("This repo is empty. Nothing to scan yet.")
+        raise GitHubError("This repo is empty. Push a commit, then scan again.")
     if r.status_code >= 400:
-        raise GitHubError(f"GitHub error {r.status_code}.")
+        raise GitHubError(f"GitHub returned error {r.status_code}.")
     return r.json()
 
 
 def parse_time(text):
-    """GitHub time '2026-10-31T10:15:00Z' -> Python datetime."""
+    """GitHub time '2026-10-31T10:15:00Z' -> Python datetime (UTC)."""
     return datetime.fromisoformat(text.replace("Z", "+00:00"))
 
 
@@ -88,7 +87,7 @@ def get_repo(owner, name):
 
 
 def list_commits(owner, name, limit=30):
-    """Return commit SHAs, newest first."""
+    """Return commit SHAs of the default branch, newest first."""
     data = _get(f"/repos/{owner}/{name}/commits", params={"per_page": min(limit, 100)})
     return [c["sha"] for c in data]
 
@@ -105,7 +104,7 @@ def get_commit(owner, name, sha):
     for f in files:
         patch = f.get("patch")
         if patch is None and f.get("changes", 0) > 0:
-            partial = True  # GitHub skipped this diff because it's too big
+            partial = True  # GitHub skipped this diff because it was too big
         out_files.append({
             "filename": f["filename"],
             "status": f.get("status"),

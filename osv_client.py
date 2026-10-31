@@ -1,5 +1,5 @@
 # osv_client.py
-# Asks OSV.dev (free public vulnerability database) about library versions.
+# Asks OSV.dev (a free, public vulnerability database by Google) about library versions.
 import re
 from concurrent.futures import ThreadPoolExecutor
 
@@ -39,15 +39,15 @@ def _get_vuln(vuln_id):
         except requests.RequestException:
             raise OSVError("Could not reach the OSV.dev vulnerability database.")
         if r.status_code >= 400:
-            raise OSVError(f"OSV.dev error {r.status_code}.")
+            raise OSVError(f"OSV.dev returned error {r.status_code}.")
         _vuln_cache[vuln_id] = r.json()
     return _vuln_cache[vuln_id]
 
 
 def _severity(vuln):
     level = (vuln.get("database_specific") or {}).get("severity")
-    if level and level.upper() in SEVERITY_MAP:
-        return SEVERITY_MAP[level.upper()]
+    if level and str(level).upper() in SEVERITY_MAP:
+        return SEVERITY_MAP[str(level).upper()]
     for affected in vuln.get("affected", []):
         level = (affected.get("ecosystem_specific") or {}).get("severity")
         if level and str(level).upper() in SEVERITY_MAP:
@@ -75,12 +75,12 @@ def _fixed_after(vuln, ecosystem, name, current):
 def check_packages(packages):
     """
     packages: list of (ecosystem, name, version)
-    Returns {(ecosystem, name, version): summary} only for vulnerable ones.
+    Returns {(ecosystem, name, version): summary} for vulnerable ones only.
     """
     unique = list(set(packages))
     todo = [p for p in unique if p not in _query_cache]
 
-    # 1. Ask OSV which vulnerabilities affect each package (in batches)
+    # 1. Which vulnerabilities affect each package? (batched)
     for i in range(0, len(todo), 100):
         chunk = todo[i:i + 100]
         body = {"queries": [
@@ -91,18 +91,18 @@ def check_packages(packages):
         except requests.RequestException:
             raise OSVError("Could not reach the OSV.dev vulnerability database.")
         if r.status_code >= 400:
-            raise OSVError(f"OSV.dev error {r.status_code}.")
+            raise OSVError(f"OSV.dev returned error {r.status_code}.")
         for pkg, result in zip(chunk, r.json().get("results", [])):
             _query_cache[pkg] = [v["id"] for v in result.get("vulns", [])]
 
-    # 2. Download details for all vulnerabilities (8 at a time, in parallel)
+    # 2. Download details of every vulnerability (8 in parallel)
     all_ids = {vid for p in unique for vid in _query_cache.get(p, [])}
     missing = [vid for vid in all_ids if vid not in _vuln_cache]
     if missing:
         with ThreadPoolExecutor(max_workers=8) as pool:
             list(pool.map(_get_vuln, missing))
 
-    # 3. Build a summary per package
+    # 3. One summary per package
     out = {}
     for pkg in unique:
         ids = _query_cache.get(pkg, [])
@@ -110,7 +110,7 @@ def check_packages(packages):
             continue
         ecosystem, name, version = pkg
 
-        # prefer GHSA records (they usually include severity); skip aliases
+        # prefer GHSA records (they usually have severity); skip aliases of the same issue
         seen, vulns = set(), []
         for vid in sorted(ids, key=lambda x: (not x.startswith("GHSA"), x)):
             if vid in seen:

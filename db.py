@@ -1,12 +1,13 @@
 # db.py
 # One shared connection to MongoDB for the whole project.
 import os
+
 from dotenv import load_dotenv
 from pymongo import MongoClient
 
 load_dotenv()
 
-_client = None  # we create the connection once and reuse it
+_client = None  # created once, reused everywhere
 
 
 def get_db():
@@ -16,5 +17,5 @@ def get_db():
         uri = os.getenv("MONGO_URI")
         if not uri:
             raise RuntimeError("MONGO_URI is missing. Check your .env file.")
-        _client = MongoClient(uri)
+        _client = MongoClient(uri, serverSelectionTimeoutMS=15000)
     return _client[os.getenv("DB_NAME", "releaseguard")]

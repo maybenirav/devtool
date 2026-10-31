@@ -1,53 +1,36 @@
 # test_db_rules.py
-# Proves: (1) unique index blocks duplicates, (2) validation blocks bad data.
+# Proves on your real Atlas database: (1) unique index blocks duplicates,
+# (2) schema validation blocks broken data. Cleans up after itself.
 from datetime import datetime, timezone
+
 from pymongo.errors import DuplicateKeyError, WriteError
+
 from db import get_db
 
 db = get_db()
 now = datetime.now(timezone.utc)
-
-good_finding = {
-    "findingId": "test-finding-1",
-    "repoId": "test/test-repo",
-    "scanId": "test-scan-1",
-    "commitSha": "abc123",
-    "committedAt": now,
-    "type": "secret",
-    "severity": "critical",
-    "action": "added",
-    "fingerprint": "secret:test",
-    "file": "config.py",
-    "title": "Test AWS key",
-    "details": {"provider": "AWS", "masked": "AKIA****TEST"},
+good = {
+    "findingId": "test-finding-1", "repoId": "test/test-repo", "scanId": "test-scan-1",
+    "commitSha": "abc123", "committedAt": now, "type": "secret", "severity": "critical",
+    "action": "added", "fingerprint": "secret:test", "file": "config.py",
+    "title": "Test AWS key", "details": {"provider": "AWS", "masked": "AKIA****TEST"},
     "detectedAt": now,
 }
+db.findings.delete_many({"repoId": "test/test-repo"})
 
-db.findings.delete_many({"repoId": "test/test-repo"})  # clean old test data
-
-# Test 1: a valid finding is accepted
-db.findings.insert_one(dict(good_finding))
-print("✅ Test 1: valid finding saved")
-
-# Test 2: the same finding again is rejected (unique index)
+db.findings.insert_one(dict(good))
+print("OK  Test 1: valid finding saved")
 try:
-    db.findings.insert_one(dict(good_finding))
-    print("❌ Test 2: duplicate was saved (should not happen!)")
+    db.findings.insert_one(dict(good))
+    print("BAD Test 2: duplicate was saved")
 except DuplicateKeyError:
-    print("✅ Test 2: duplicate blocked by unique index")
-
-# Test 3: a broken finding is rejected (schema validation)
-bad_finding = {
-    "findingId": "test-finding-2",
-    "repoId": "test/test-repo",
-    "type": "secret",
-    "severity": "super bad",  # not an allowed value, and many fields missing
-}
+    print("OK  Test 2: duplicate blocked by unique index")
 try:
-    db.findings.insert_one(bad_finding)
-    print("❌ Test 3: broken finding was saved (should not happen!)")
+    db.findings.insert_one({"findingId": "test-finding-2", "repoId": "test/test-repo",
+                            "type": "secret", "severity": "super bad"})
+    print("BAD Test 3: broken finding was saved")
 except WriteError:
-    print("✅ Test 3: broken finding rejected by schema validation")
+    print("OK  Test 3: broken finding rejected by schema validation")
 
-db.findings.delete_many({"repoId": "test/test-repo"})  # clean up
+db.findings.delete_many({"repoId": "test/test-repo"})
 print("Test data cleaned up.")

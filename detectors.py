@@ -31,7 +31,7 @@ def parse_patch(patch):
 
 # ---------- Check 1: Secrets ----------
 
-# (rule id, provider, severity, pattern) -- order matters: specific rules first
+# (rule id, provider, severity, pattern) - specific rules first
 SECRET_RULES = [
     ("private_key", "Private key", "critical",
      re.compile(r"-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP )?PRIVATE KEY(?: BLOCK)?-----")),
@@ -89,7 +89,7 @@ def _overlaps(span, taken):
 
 
 def find_secrets(text, filename):
-    """Return a list of secrets found in one line of code."""
+    """Return the secrets found in one line of code."""
     results, taken = [], []
 
     for rule_id, provider, severity, pattern in SECRET_RULES:
@@ -100,7 +100,7 @@ def find_secrets(text, filename):
             if rule_id != "private_key" and looks_like_placeholder(value):
                 continue
             taken.append(m.span())
-            # all private keys share the same header, so include the file name
+            # every private key starts with the same header, so add the file name
             fp_source = value + "|" + filename if rule_id == "private_key" else value
             results.append({
                 "ruleId": rule_id,
@@ -180,7 +180,7 @@ def parse_requirement(line):
     if not m:
         return None
     name, op, version = m.group(1), m.group(2), m.group(3)
-    pinned = op in ("==", "===") and version and "*" not in version
+    pinned = bool(op in ("==", "===") and version and "*" not in version)
     return {
         "ecosystem": "PyPI",
         "name": normalize_pypi_name(name),
@@ -216,7 +216,8 @@ def parse_npm(line):
 
 
 def dependency_parser_for(filename):
-    base = filename.rsplit("/", 1)[-1].lower()
+    # tolerant of stray spaces / trailing dots, e.g. "requirements.txt."
+    base = filename.rsplit("/", 1)[-1].lower().strip().rstrip(".")
     if base == "package.json":
         return parse_npm
     if base.startswith("requirements") and base.endswith(".txt"):
