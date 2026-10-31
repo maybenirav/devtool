@@ -78,7 +78,7 @@ def init():
     git("init", "-b", "main")
     write("README.md", "# ReleaseGuard demo app\n\nA tiny Flask app used to demo ReleaseGuard.\n")
     commit("Initial commit", "README.md")
-    write("requirements.txt", "flask==3.0.3\n")
+    write("requirements.txt", "flask==3.1.3\n")
     write("app.py", APP_PY)
     commit("Add Flask app", "requirements.txt", "app.py")
     push_if_remote()
@@ -86,7 +86,7 @@ def init():
 
 
 def break_it():
-    write("requirements.txt", "flask==3.0.3\ndjango==2.2.0\nrequests\n")
+    write("requirements.txt", "flask==3.1.3\ndjango==2.2.0\nrequests\n")
     commit("Add django and requests", "requirements.txt")
     write("package.json", PACKAGE_JSON)
     commit("Add frontend dependencies", "package.json")
@@ -99,7 +99,7 @@ def break_it():
 def fix():
     write("config.py", CONFIG_PY.replace('AWS_ACCESS_KEY_ID = "AKIA4RG7QW2XLMN8PZTK"\n', ""))
     commit("Remove AWS key", "config.py")
-    write("requirements.txt", "flask==3.0.3\ndjango==4.2.16\nrequests\n")
+    write("requirements.txt", "flask==3.1.3\ndjango==4.2.16\nrequests\n")
     commit("Upgrade django", "requirements.txt")
     push_if_remote()
     print("\nDone. Scan again: django shows as FIXED, the AWS key stays 'still in git history'.")
